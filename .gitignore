@@ -1,0 +1,7 @@
+#ignore the database
+/database.db
+
+#igore .venv
+.venv
+
+#ignore the .ipynb files
