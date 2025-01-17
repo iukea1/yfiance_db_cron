@@ -1,91 +1,223 @@
-from db_setup import DatabaseConnection
 import yfinance as yf
 import pandas as pd
-from database import Stock, HistoricalPrice, BalanceSheet, IncomeStatement, CashFlow, AnalystRecommendation, InstitutionalHolder, Dividend, Earnings
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 from datetime import datetime
-from sqlalchemy import func
+import logging
+from typing import Optional, Union
+import numpy as np
+from modles import (
+    StockPrice, StockSplit, Dividend, AnalystPriceTarget,
+    BalanceSheet, CashFlow, IncomeStatement, Sustainability,
+    CalendarEvent, CapitalGain, AnalystRecommendation
+)
 
-def verify_data(session):
-    # Get count of records
-    stock_count = session.query(Stock).count()
-    prices_count = session.query(HistoricalPrice).count()
-    
-    # Get the first and last dates
-    first_date = session.query(func.min(HistoricalPrice.date)).scalar()
-    last_date = session.query(func.max(HistoricalPrice.date)).scalar()
-    
-    print("\nData Verification:")
-    print(f"Number of stocks: {stock_count}")
-    print(f"Number of price records: {prices_count}")
-    print(f"Date range: {first_date} to {last_date}")
-    
-    # Get sample of price data
-    sample_prices = session.query(HistoricalPrice)\
-        .order_by(HistoricalPrice.date.desc())\
-        .limit(5)\
-        .all()
-    
-    print("\nMost recent price records:")
-    for price in sample_prices:
-        print(f"Date: {price.date}, Close: {price.close}, Volume: {price.volume}")
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+class StockDataCollector:
+    def __init__(self, ticker: str, db_url: str):
+        """
+        Initialize the stock data collector.
+        
+        Args:
+            ticker (str): Stock ticker symbol
+            db_url (str): Database connection URL
+        """
+        self.ticker = ticker
+        self.engine = create_engine(db_url)
+        self.Session = sessionmaker(bind=self.engine)
+        self.stock_data = yf.Ticker(ticker)
+        
+    def safe_float_convert(self, value: Union[int, float, str, None]) -> Optional[float]:
+        """Safely convert a value to float."""
+        if pd.isna(value) or value is None:
+            return None
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return None
+
+    def save_historical_prices(self, session) -> None:
+        """Save historical price data to database."""
+        try:
+            df = self.stock_data.history(period="max")
+            for index, row in df.iterrows():
+                stock_price = StockPrice(
+                    ticker=self.ticker,
+                    date=index,
+                    open=self.safe_float_convert(row['Open']),
+                    high=self.safe_float_convert(row['High']),
+                    low=self.safe_float_convert(row['Low']),
+                    close=self.safe_float_convert(row['Close']),
+                    volume=int(row['Volume']) if pd.notna(row['Volume']) else None
+                )
+                session.add(stock_price)
+            logger.info(f"Saved historical prices for {self.ticker}")
+        except Exception as e:
+            logger.error(f"Error saving historical prices: {str(e)}")
+            raise
+
+    def save_splits_and_dividends(self, session) -> None:
+        """Save splits and dividends data to database."""
+        try:
+            # Save splits
+            splits_df = self.stock_data.splits
+            for index, split_ratio in splits_df.items():
+                split = StockSplit(
+                    ticker=self.ticker,
+                    date=index,
+                    split_ratio=self.safe_float_convert(split_ratio)
+                )
+                session.add(split)
+
+            # Save dividends
+            dividends_df = self.stock_data.dividends
+            for index, amount in dividends_df.items():
+                dividend = Dividend(
+                    ticker=self.ticker,
+                    date=index,
+                    amount=self.safe_float_convert(amount)
+                )
+                session.add(dividend)
+            
+            logger.info(f"Saved splits and dividends for {self.ticker}")
+        except Exception as e:
+            logger.error(f"Error saving splits and dividends: {str(e)}")
+            raise
+
+    def save_analyst_data(self, session) -> None:
+        """Save analyst price targets and recommendations."""
+        try:
+            price_targets = self.stock_data.analyst_price_targets
+            if isinstance(price_targets, pd.DataFrame) and not price_targets.empty:
+                for index, row in price_targets.iterrows():
+                    target = AnalystPriceTarget(
+                        ticker=self.ticker,
+                        date=index,
+                        firm=str(row.get('Firm', '')),
+                        target_price=self.safe_float_convert(row.get('Target Price')),
+                        rating=str(row.get('Rating', ''))
+                    )
+                    session.add(target)
+            logger.info(f"Saved analyst data for {self.ticker}")
+        except Exception as e:
+            logger.error(f"Error saving analyst data: {str(e)}")
+            raise
+
+    def save_financial_statements(self, session) -> None:
+        """Save quarterly financial statements data."""
+        try:
+            # Balance Sheet
+            balance_sheet = self.stock_data.quarterly_balance_sheet
+            if isinstance(balance_sheet, pd.DataFrame):
+                for date in balance_sheet.columns:  # dates are in columns
+                    for item_name, value in balance_sheet[date].items():  # items are in index
+                        if pd.notna(value):
+                            balance = BalanceSheet(
+                                ticker=self.ticker,
+                                date=date,  # date is already a datetime object from yfinance
+                                item_name=str(item_name),  # item names are in the index
+                                value=self.safe_float_convert(value),
+                                is_quarterly=True
+                            )
+                            session.add(balance)
+
+            # Cash Flow - apply the same fix
+            cash_flow = self.stock_data.quarterly_cashflow
+            if isinstance(cash_flow, pd.DataFrame):
+                for date in cash_flow.columns:
+                    for item_name, value in cash_flow[date].items():
+                        if pd.notna(value):
+                            cashflow = CashFlow(
+                                ticker=self.ticker,
+                                date=date,
+                                item_name=str(item_name),
+                                value=self.safe_float_convert(value),
+                                is_quarterly=True
+                            )
+                            session.add(cashflow)
+
+            # Income Statement - apply the same fix
+            income_stmt = self.stock_data.quarterly_financials
+            if isinstance(income_stmt, pd.DataFrame):
+                for date in income_stmt.columns:
+                    for item_name, value in income_stmt[date].items():
+                        if pd.notna(value):
+                            income = IncomeStatement(
+                                ticker=self.ticker,
+                                date=date,
+                                item_name=str(item_name),
+                                value=self.safe_float_convert(value),
+                                is_quarterly=True
+                            )
+                            session.add(income)
+
+            logger.info(f"Saved financial statements for {self.ticker}")
+        except Exception as e:
+            logger.error(f"Error saving financial statements: {str(e)}")
+            raise
+
+    def save_sustainability_data(self, session) -> None:
+        """Save sustainability metrics."""
+        try:
+            sustainability = self.stock_data.sustainability
+            if isinstance(sustainability, pd.DataFrame):
+                current_date = datetime.now().date()
+                # Transpose if needed to get metrics as rows
+                if len(sustainability.columns) > len(sustainability.index):
+                    sustainability = sustainability.transpose()
+                
+                for index, row in sustainability.iterrows():
+                    # Handle the case where values might be Series
+                    value = row.iloc[0] if isinstance(row, pd.Series) else row
+                    if pd.notna(value):
+                        sustainability_record = Sustainability(
+                            ticker=self.ticker,
+                            date=current_date,
+                            metric_name=str(index),
+                            value=self.safe_float_convert(value)
+                        )
+                        session.add(sustainability_record)
+            logger.info(f"Saved sustainability data for {self.ticker}")
+        except Exception as e:
+            logger.error(f"Error saving sustainability data: {str(e)}")
+            raise
+
+    def collect_and_save_all_data(self) -> None:
+        """Main method to collect and save all stock data."""
+        session = self.Session()
+        try:
+            self.save_historical_prices(session)
+            self.save_splits_and_dividends(session)
+            self.save_analyst_data(session)
+            self.save_financial_statements(session)
+            self.save_sustainability_data(session)
+            
+            session.commit()
+            logger.info(f"Successfully saved all data for {self.ticker}")
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error in data collection process: {str(e)}")
+            raise
+        finally:
+            session.close()
 
 def main():
-    # Initialize database
-    db = DatabaseConnection()
-    session = db.get_session()
-    
+    """Main execution function."""
     try:
-        # Create a new stock entry
-        symbol = "MSFT"
-        
-        # Check if stock already exists
-        stock = session.query(Stock).filter_by(symbol=symbol).first()
-        if not stock:
-            stock = Stock(symbol=symbol)
-            session.add(stock)
-            session.commit()
-        
-        # Get stock data from yfinance
-        yf_stock = yf.Ticker(symbol)
-        
-        # Store historical prices
-        history_df = yf_stock.history(period='1y')
-        print(f"\nProcessing {len(history_df)} historical prices...")
-        
-        for date, row in history_df.iterrows():
-            # Check if price already exists for this date
-            existing_price = session.query(HistoricalPrice)\
-                .filter_by(stock_id=stock.id, date=date.date())\
-                .first()
-            
-            if not existing_price:
-                hist_price = HistoricalPrice(
-                    stock_id=stock.id,
-                    date=date.date(),
-                    open=row['Open'],
-                    high=row['High'],
-                    low=row['Low'],
-                    close=row['Close'],
-                    volume=int(row['Volume']),
-                    dividends=row['Dividends'],
-                    stock_splits=row['Stock Splits']
-                )
-                session.add(hist_price)
-        
-        # Commit the changes
-        session.commit()
-        print(f"Successfully stored data for {symbol}")
-        
-        # Verify the data
-        verify_data(session)
-        
+        collector = StockDataCollector(
+            ticker="MSFT",
+            db_url='sqlite:///finance_data.db'
+        )
+        collector.collect_and_save_all_data()
     except Exception as e:
-        print(f"An error occurred: {e}")
-        session.rollback()
-    
-    finally:
-        session.close()
-        db.close()
+        logger.error(f"Fatal error in main execution: {str(e)}")
+        raise
 
 if __name__ == "__main__":
     main()
