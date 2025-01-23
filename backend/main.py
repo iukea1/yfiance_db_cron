@@ -11,7 +11,7 @@ from modles import (
     BalanceSheet, CashFlow, IncomeStatement, Sustainability,
     CalendarEvent, CapitalGain, AnalystRecommendation
 )
-
+import time
 # Set up logging configuration for tracking script execution
 logging.basicConfig(
     level=logging.INFO,
@@ -209,6 +209,23 @@ class StockDataCollector:
                                 is_quarterly=True
                             )
                             session.add(income)
+                            
+            #AnalystRecommendation
+            analyst_recommendation = self.stock_data.recommendations
+            if isinstance(analyst_recommendation, pd.DataFrame) and not analyst_recommendation.empty:
+                for index, row in analyst_recommendation.iterrows():
+                    # Convert Timestamp index to date object
+                    date = index.date() if hasattr(index, 'date') else None
+                    if date:  # Only add if we have a valid date
+                        recommendation = AnalystRecommendation(
+                            ticker_id=self.ticker_id,
+                            date=date,
+                            firm=str(row['Firm']) if 'Firm' in row else '',
+                            to_grade=str(row['To Grade']) if 'To Grade' in row else '',
+                            from_grade=str(row['From Grade']) if 'From Grade' in row else '',
+                            action=str(row['Action']) if 'Action' in row else ''
+                        )
+                        session.add(recommendation)
 
             logger.info(f"Saved financial statements for {self.ticker_symbol}")
         except Exception as e:
@@ -256,7 +273,6 @@ class StockDataCollector:
         try:
             # First, ensure ticker exists and get its ID
             self.get_or_create_ticker(session)
-            
             # Now collect and save all related data
             self.save_historical_prices(session)
             self.save_splits_and_dividends(session)
@@ -299,7 +315,6 @@ def main():
     4. Logs progress and errors throughout execution
     """
     file_path = '/Users/jordanchaput/Desktop/coding_projects/python_projects/fiance_project/yfiance_db_cron/backend/stocks.txt'
-    
     try:
         ticker_symbols = read_ticker_symbols(file_path)
         logger.info(f"Processing {len(ticker_symbols)} ticker symbols")
@@ -317,6 +332,12 @@ def main():
                 logger.error(f"Error processing ticker {symbol}: {str(e)}")
                 # Continue with next ticker instead of stopping the entire process
                 continue
+                
+            # Add 5 second delay before next ticker
+            time.sleep(5)
+            #print sleeping 
+            logger.info(f"Sleeping for 5 seconds before processing next ticker")
+            
                 
     except Exception as e:
         logger.error(f"Fatal error in main execution: {str(e)}")
