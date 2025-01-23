@@ -5,3 +5,21 @@
 .venv
 
 #ignore the .ipynb files
+
+#ignore the .pyc files
+*.pyc
+
+#ignore the __pycache__ folder
+__pycache__/
+
+#ignore the .DS_Store file
+.DS_Store
+
+#ignore the .env file
+.env
+#ignore db files
+*.db
+
+#ignore the .venv folder
+.venv/
+
